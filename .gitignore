@@ -1,0 +1,25 @@
+# output scan
+sapujagat-out/
+*.log
+*.tmp
+
+# backup
+*.bak
+*.bak-*
+*.v*-old
+
+# env & secret
+.env
+cookies.txt
+credentials.txt
+
+# system
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# editor
+.vscode/
+.idea/
+*.swp
