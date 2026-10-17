@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="banner.png" alt="SapuJagat banner" width="100%">
+<img src="file_00000000061c8211a1f2c6ac1e383ea1.png" alt="SapuJagat banner" width="100%">
 
 # SapuJagat
 
